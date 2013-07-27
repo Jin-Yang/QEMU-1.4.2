@@ -99,6 +99,81 @@
 
 #define READ_BUF_LEN 4096
 
+
+
+
+
+
+
+
+
+#define DEBUG_CAN
+#ifdef DEBUG_CAN
+#define DPRINTF(fmt, ...) \
+   do { fprintf(stderr, "[mycan]: " fmt , ## __VA_ARGS__); } while (0)
+#else
+#define DPRINTF(fmt, ...) \
+   do {} while (0)
+#endif
+
+
+static int can_chr_write(CharDriverState *chr, const uint8_t *buf, int len)
+{
+	DPRINTF("%s-%s() called\n", __FILE__, __FUNCTION__);
+    return 0;
+}
+
+/*static int can_chr_read(CharDriverState *chr, uint8_t *buf, int len)
+{
+	printf("[ddddd] %s %s called\n", __FUNCTION__, __FILE__);
+	return 0;
+}*/
+
+static void can_chr_close(struct CharDriverState *chr)
+{
+	DPRINTF("%s-%s() called\n", __FILE__, __FUNCTION__);
+}
+
+
+
+static CharDriverState *qemu_chr_open_can(QemuOpts *opts)
+{
+    CharDriverState *chr;/*
+    const char *filename = qemu_opt_get(opts, "port");
+    int fd;
+
+	printf("[ddddd] %s %s called\n", __FUNCTION__, __FILE__);
+    TFR(fd = qemu_open(filename, O_RDWR | O_NONBLOCK));
+    if (fd < 0) {
+        return NULL;
+    }*/
+//    return qemu_chr_open_tty_fd(fd);
+
+	DPRINTF("%s-%s() called\n", __FILE__, __FUNCTION__);
+
+    chr = g_malloc0(sizeof(CharDriverState));
+
+    chr->chr_write = can_chr_write;
+    chr->chr_close = can_chr_close;
+
+    return chr;
+
+//fail:
+//    g_free(chr);
+//    return NULL;
+}
+
+
+
+
+
+
+
+
+
+
+
+
 /***********************************************************/
 /* character device */
 
@@ -2992,6 +3067,7 @@ static const struct {
     { .name = "serial",    .open = qemu_chr_open_win },
     { .name = "stdio",     .open = qemu_chr_open_win_stdio },
 #else
+    { .name = "can",       .open = qemu_chr_open_can },
     { .name = "file",      .open = qemu_chr_open_file_out },
     { .name = "pipe",      .open = qemu_chr_open_pipe },
     { .name = "stdio",     .open = qemu_chr_open_stdio },
