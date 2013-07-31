@@ -2,25 +2,17 @@
 #include "char/char.h"
 #include "qemu/timer.h"
 #include "exec/address-spaces.h"
+#include <linux/types.h>
 
-#define PCI_MEM_SIZE				16
+#define PCI_MEM_SIZE				32
 #define PCI_DEVICE_ID_CANBUS		0xbeef
 #define PCI_REVISION_ID_CANBUS 		0x73 
 
-typedef struct CanState {
-	/* Some registers ... */
-    qemu_irq irq;
-	void 			*mem_base;
 
-    CharDriverState *chr;
-    MemoryRegion 	portio;
-    MemoryRegion 	memio;
-} CanState;
+#define IO_BAR						0
+#define MEM_BAR						1
 
-typedef struct PCICanState {
-    PCIDevice 		dev;
-    CanState 		state;
-} PCICanState;
+
 
 #define DEBUG_CAN
 #ifdef DEBUG_CAN
@@ -32,12 +24,51 @@ typedef struct PCICanState {
 #endif
 
 
+
+
+/*
+ * Controller Area Network Identifier structure
+ *
+ * bit 0-28	: CAN identifier (11/29 bit)
+ * bit 29	: error frame flag (0 = data frame, 1 = error frame)
+ * bit 30	: remote transmission request flag (1 = rtr frame)
+ * bit 31	: frame format flag (0 = standard 11 bit, 1 = extended 29 bit)
+ */
+typedef __u32 canid_t;
+
+struct can_frame {
+	canid_t can_id;  /* 32 bit CAN_ID + EFF/RTR/ERR flags */
+	__u8    can_dlc; /* data length code: 0 .. 8 */
+	__u8    data[8] __attribute__((aligned(8)));
+};
+
+
+
+
+typedef struct CanState {
+	/* Some registers ... */
+    qemu_irq irq;
+	void 			*mem_base;
+	int 			offset;
+
+    CharDriverState *chr;
+    MemoryRegion 	portio;
+    MemoryRegion 	memio;
+} CanState;
+
+typedef struct PCICanState {
+    PCIDevice 		dev;
+    CanState 		state;
+} PCICanState;
+
+
+
+
 const uint8_t whatever[] = "ttt";
 static void can_ioport_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
 {
-    CanState *s = opaque;
-    DPRINTF("write addr=0x%02x val=0x%02x\n", (unsigned int)addr, (unsigned int)val);
-	qemu_chr_fe_write(s->chr, whatever, 3); // write to the backends.
+//    CanState *s = opaque;
+//	qemu_chr_fe_write(s->chr, whatever, 3); // write to the backends.
 }
 
 static uint64_t can_ioport_read(void *opaque, hwaddr addr, unsigned size)
@@ -56,6 +87,18 @@ const MemoryRegionOps can_io_ops = {
     },
 };
 
+static void display_msg(struct can_frame *msg)
+{
+	int i;
+
+	printf("id 0x%x, data(%d):\n", (msg->can_id & 0x1fffffff), msg->can_dlc);
+	for(i = 0; i < msg->can_dlc; i++) {
+		printf("0x%02x ", msg->data[i]);
+	}
+	printf("\n");
+}
+
+
 static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size) 
 {
     CanState 			*s = opaque;
@@ -68,11 +111,16 @@ static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
 	if(addr > region_size)
 		return ;
 
-	DPRINTF("write 0x%llx to %p\n", val, pci_mem_addr);
-	memcpy(pci_mem_addr, (void *)&val, size);	
-	DPRINTF("   pci_mem_addr 0x%llx\n", *(uint64_t *)pci_mem_addr);
+	DPRINTF("write 0x%llx addr(%d) to %p\n", val, (int)addr, pci_mem_addr);
+	if ((addr = 30) && (val == 0x55)) {
+		display_msg((struct can_frame*)s->mem_base);
+		qemu_chr_fe_write(s->chr, s->mem_base, sizeof(struct can_frame)); // write to the backends.
+		printf("PPPPPPPPPPPPPPPPPPPP\n");
+		s->offset = 0;
+		return;
+	}
 
-
+	memcpy(pci_mem_addr, (void *)&val, size);
 }  
 
 static uint64_t can_mem_read(void *opaque, hwaddr addr, unsigned size) 
@@ -101,7 +149,7 @@ static const MemoryRegionOps can_mem_ops = {
     .impl 		= {
 		// how many bytes can we read/write every time.
         .min_access_size = 1, 
-        .max_access_size = 16,
+        .max_access_size = 32,
     },
 };
 
@@ -123,13 +171,12 @@ static int can_pci_init(PCIDevice *dev)
     pci->dev.config[PCI_INTERRUPT_PIN] = 0x01;
     s->irq = pci->dev.irq[0];
 
-
 	qemu_irq_lower(s->irq);
 	
     memory_region_init_io(&s->portio, &can_io_ops, s, "can", 8);
     memory_region_init_io(&s->memio, &can_mem_ops, s, "can", PCI_MEM_SIZE);
-    pci_register_bar(&pci->dev, 0, PCI_BASE_ADDRESS_SPACE_IO, &s->portio);
-    pci_register_bar(&pci->dev, 1, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->memio);
+    pci_register_bar(&pci->dev, IO_BAR, PCI_BASE_ADDRESS_SPACE_IO, &s->portio);
+    pci_register_bar(&pci->dev, MEM_BAR, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->memio);
 
 //    memory_region_add_subregion(system_io, base, &s->io);
     return 0;
