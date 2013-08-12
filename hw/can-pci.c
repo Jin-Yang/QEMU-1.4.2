@@ -4,67 +4,19 @@
 #include "exec/address-spaces.h"
 #include <linux/types.h>
 
-#define PCI_MEM_SIZE				32
-#define PCI_DEVICE_ID_CANBUS		0xbeef
-#define PCI_REVISION_ID_CANBUS 		0x73 
+#include "can-pci.h"
 
 
-#define IO_BAR						0
-#define MEM_BAR						1
-
-
-
-#define DEBUG_CAN
-#ifdef DEBUG_CAN
-#define DPRINTF(fmt, ...) \
-   do { fprintf(stderr, "[mycan]: " fmt , ## __VA_ARGS__); } while (0)
-#else
-#define DPRINTF(fmt, ...) \
-   do {} while (0)
-#endif
+// Reset by hardware, p10
+static void can_hardware_reset(CanState *s)
+{
+	s->mode		= 0x01;
+	s->status 	= 0x0c;
+}
 
 
 
 
-/*
- * Controller Area Network Identifier structure
- *
- * bit 0-28	: CAN identifier (11/29 bit)
- * bit 29	: error frame flag (0 = data frame, 1 = error frame)
- * bit 30	: remote transmission request flag (1 = rtr frame)
- * bit 31	: frame format flag (0 = standard 11 bit, 1 = extended 29 bit)
- */
-typedef __u32 canid_t;
-
-struct can_frame {
-	canid_t can_id;  /* 32 bit CAN_ID + EFF/RTR/ERR flags */
-	__u8    can_dlc; /* data length code: 0 .. 8 */
-	__u8    data[8] __attribute__((aligned(8)));
-};
-
-
-
-
-typedef struct CanState {
-	/* Some registers ... */
-    qemu_irq irq;
-	void 			*mem_base;
-	int 			offset;
-
-    CharDriverState *chr;
-    MemoryRegion 	portio;
-    MemoryRegion 	memio;
-} CanState;
-
-typedef struct PCICanState {
-    PCIDevice 		dev;
-    CanState 		state;
-} PCICanState;
-
-
-
-
-const uint8_t whatever[] = "ttt";
 static void can_ioport_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
 {
 //    CanState *s = opaque;
@@ -98,12 +50,41 @@ static void display_msg(struct can_frame *msg)
 	printf("\n");
 }
 
+static void buff2frame(uint8_t *buff, struct can_frame *can)
+{
+	uint8_t i;
+
+	if (buff[0] & 0x40) // RTR
+		can->can_id = 0x01 << 30;
+	can->can_dlc = buff[0] & 0x0f;
+
+	if (buff[0] & 0x80) { // Extended
+		can->can_id |= 0x01 << 31;
+		can->can_id |= buff[1] << 21;
+		can->can_id |= buff[2] << 13;
+		can->can_id |= buff[3] << 05;
+		can->can_id |= buff[4] >> 03;
+		for (i = 0; i < can->can_dlc; i++)
+			can->data[i] = buff[5+i];
+		for (; i < 8; i++)
+			can->data[i] = 0;
+	} else {
+		can->can_id |= buff[1] << 03;
+		can->can_id |= buff[2] >> 05;
+		for (i = 0; i < can->can_dlc; i++)
+			can->data[i] = buff[3+i];
+		for (; i < 8; i++)
+			can->data[i] = 0;
+	}
+}
+
 
 static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size) 
 {
     CanState 			*s = opaque;
 	void    			*pci_mem_addr;
 	int    				region_size;
+	struct can_frame	can;
 
 	pci_mem_addr = s->mem_base;  
 	pci_mem_addr = ((char *)pci_mem_addr) + addr;  
@@ -112,15 +93,50 @@ static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
 		return ;
 
 	DPRINTF("write 0x%llx addr(%d) to %p\n", val, (int)addr, pci_mem_addr);
-	if ((addr = 30) && (val == 0x55)) {
-		display_msg((struct can_frame*)s->mem_base);
-		qemu_chr_fe_write(s->chr, s->mem_base, sizeof(struct can_frame)); // write to the backends.
-		printf("PPPPPPPPPPPPPPPPPPPP\n");
-		s->offset = 0;
-		return;
+
+	switch (addr) {
+		case 0:
+			s->mode = 0x1f & val;
+			break;
+
+		case 1: // Command register.
+			if (0x01 & val) { // Send transmission request.
+				memcpy(s->tx_buff, s->trx_buff, 13);
+				buff2frame(s->tx_buff, &can);
+				display_msg(&can);
+				// write to the backends.
+				qemu_chr_fe_write(s->chr, (uint8_t *)&can, sizeof(struct can_frame));
+				qemu_irq_raise(s->irq);
+			}
+			break;
+		case 16:
+		case 17:
+		case 18:
+		case 19:
+		case 20:
+		case 21:
+		case 22:
+		case 23:
+		case 24:
+		case 25:
+		case 26:
+		case 27:
+		case 28:
+			if (s->mode & 0x01) { // Reset mode
+				if (addr < 24)
+					s->code_mask[addr - 16] = val;
+			} else
+				s->trx_buff[addr - 16] = val; // Operation mode
+			break;
+		case 127:
+			if (val == 0x33)
+				qemu_irq_lower(s->irq);
+			break;
 	}
 
-	memcpy(pci_mem_addr, (void *)&val, size);
+
+//		qemu_mod_timer(s->transmit_timer, 0);
+//		qemu_mod_timer(s->transmit_timer, qemu_get_clock_ns(vm_clock) + 8 * get_ticks_per_sec());
 }  
 
 static uint64_t can_mem_read(void *opaque, hwaddr addr, unsigned size) 
@@ -133,11 +149,24 @@ static uint64_t can_mem_read(void *opaque, hwaddr addr, unsigned size)
 	pci_mem_addr = s->mem_base;  
 	pci_mem_addr = ((char *)pci_mem_addr) + addr;  
 	region_size  = memory_region_size(&s->memio);
+	DPRINTF("read addr %d, region size %d\n", (int)addr, region_size);
 	if(addr > region_size)  
 		return 0;
 
-	memcpy(&temp, pci_mem_addr, size);
-	DPRINTF("read %d bytes of 0x%x from %p\n", size, temp, pci_mem_addr);
+	switch (addr) {
+		case 0:
+			temp = s->mode;
+			break;
+		case 2: // Status register.
+			temp = s->status;
+			break;
+
+		default:
+			temp = 0xff;
+	}
+
+//	memcpy(&temp, pci_mem_addr, size);
+	DPRINTF("read %d bytes of 0x%x from addr %d\n", size, temp, (int)addr);
 
 	return temp;
 }
@@ -149,11 +178,27 @@ static const MemoryRegionOps can_mem_ops = {
     .impl 		= {
 		// how many bytes can we read/write every time.
         .min_access_size = 1, 
-        .max_access_size = 32,
+        .max_access_size = 1,
     },
 };
 
 
+static void serial_xmit(void *opaque)
+{
+    CanState *s = opaque;
+	static int count = 1;
+
+	if (count) {
+	printf("xxx33333333333333333333333xxxxxxxxxxxxxxx\n");
+		qemu_irq_raise(s->irq);
+		count = 0;
+		qemu_mod_timer(s->transmit_timer, qemu_get_clock_ns(vm_clock) + get_ticks_per_sec()/1000);
+	} else {
+	printf("xxx55555555555555555555xxxxxxxxxxxxxxx\n");
+		count = 1;		
+		qemu_irq_lower(s->irq);
+	}
+}
 static int can_pci_init(PCIDevice *dev)
 {
 	// Get the address of PCICanState through PCIDevice.
@@ -178,7 +223,13 @@ static int can_pci_init(PCIDevice *dev)
     pci_register_bar(&pci->dev, IO_BAR, PCI_BASE_ADDRESS_SPACE_IO, &s->portio);
     pci_register_bar(&pci->dev, MEM_BAR, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->memio);
 
-//    memory_region_add_subregion(system_io, base, &s->io);
+
+    s->transmit_timer = qemu_new_timer_ns(vm_clock, (QEMUTimerCB *) serial_xmit, s);
+
+
+
+	can_hardware_reset(s);
+
     return 0;
 }
 
@@ -238,3 +289,5 @@ static void can_pci_register_types(void)
 }
 
 type_init(can_pci_register_types)
+
+
