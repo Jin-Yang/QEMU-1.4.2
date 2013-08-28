@@ -75,6 +75,8 @@
 
 #include <linux/ppdev.h>
 #include <linux/parport.h>
+#include <linux/can.h>
+#include <linux/can/raw.h>
 #endif
 #ifdef __sun__
 #include <sys/stat.h>
@@ -97,9 +99,6 @@
 #include "qemu/sockets.h"
 #include "ui/qemu-spice.h"
 
-#include <linux/can.h>
-#include <linux/can/raw.h>
-
 #define READ_BUF_LEN 4096
 
 /***********************************************************/
@@ -109,7 +108,7 @@ static QTAILQ_HEAD(CharDriverStateHead, CharDriverState) chardevs =
     QTAILQ_HEAD_INITIALIZER(chardevs);
 
 
-#define DEBUG_CAN
+//#define DEBUG_CAN
 #ifdef DEBUG_CAN
 #define DPRINTF(fmt, ...) \
    do { fprintf(stderr, "[backend]: " fmt , ## __VA_ARGS__); } while (0)
@@ -119,19 +118,80 @@ static QTAILQ_HEAD(CharDriverStateHead, CharDriverState) chardevs =
 #endif
 
 
-
-
-
-
+#define NUM_FILTER				4
+#define CAN_READ_BUF_LEN		5
 typedef struct {
-    size_t size;
+	struct can_filter	rfilter[NUM_FILTER];
+	can_err_mask_t		err_mask;
 
-	int 	fd;
+    struct can_frame	buf[CAN_READ_BUF_LEN];
+    int 				bufcnt;
+    int 				bufptr;
+    int 				max_size;
+
+	int 				fd;
 } CANCharDriver;
 
 
+#ifdef DEBUG_CAN
+static void display_msg(struct can_frame *msg)
+{
+	int i;
 
+	printf("%03X [%01d]:", (msg->can_id & 0x1fffffff), msg->can_dlc);
+	for(i = 0; i < msg->can_dlc; i++) {
+		printf("  %02X", msg->data[i]);
+	}
+	printf("\n");
+}
+#endif
 
+// >0 can read
+static int can_chr_read_poll(void *opaque)
+{
+	CharDriverState *chr = opaque;
+	CANCharDriver *d = chr->opaque;
+
+    d->max_size = qemu_chr_be_can_write(chr);
+
+    /* If there were any stray characters in the queue process them first */
+    while (d->max_size > 0 && d->bufptr < d->bufcnt) {
+		// Write only one can frame per time.
+        qemu_chr_be_write(chr, (uint8_t*)&d->buf[d->bufptr], sizeof(struct can_frame));
+        d->bufptr += sizeof(struct can_frame);
+        d->max_size = qemu_chr_be_can_write(chr);
+    }
+
+    return d->max_size;
+}
+
+static void can_chr_read(void *opaque)
+{
+	CharDriverState *chr = opaque;
+	CANCharDriver *d = chr->opaque;
+
+	DPRINTF("%s %s called\n", __FUNCTION__, __FILE__);
+    if (d->max_size == 0)
+        return;
+
+	d->bufcnt = read(d->fd, d->buf, CAN_READ_BUF_LEN * sizeof(struct can_frame));
+    if(d->bufcnt < 0) {
+		perror("read");
+		return;
+	}
+	d->bufptr = 0;
+
+    while (d->max_size > 0 && d->bufptr < d->bufcnt) {
+		// Write only one can frame per time.
+        qemu_chr_be_write(chr, (uint8_t*)&d->buf[d->bufptr], sizeof(struct can_frame));
+        d->bufptr += sizeof(struct can_frame);
+        d->max_size = qemu_chr_be_can_write(chr);
+    }
+
+#ifdef DEBUG_CAN
+	display_msg(d->buf);// Just display the first one.
+#endif
+}
 
 static int can_chr_write(CharDriverState *chr, const uint8_t *buf, int len)
 {
@@ -148,27 +208,53 @@ static int can_chr_write(CharDriverState *chr, const uint8_t *buf, int len)
     return 0;
 }
 
-/*static int can_chr_read(CharDriverState *chr, uint8_t *buf, int len)
-{
-	printf("[ddddd] %s %s called\n", __FUNCTION__, __FILE__);
-	return 0;
-}*/
-
 static void can_chr_close(struct CharDriverState *chr)
 {
     CANCharDriver *d = chr->opaque;
-
-    g_free(d);
+	
+    g_free(d); // Needn't to free(chr).
     chr->opaque = NULL;
 }
 
+static int can_chr_ioctl(CharDriverState *chr, int cmd, void *arg)
+{
+    CANCharDriver *d = chr->opaque;
 
+#ifdef DEBUG_CAN
+	int i;
+	struct can_filter *p = arg;
+#endif
+
+	if(cmd > 4) return -1;
+
+#ifdef DEBUG_CAN
+	for(i = 0; i < cmd; i++) {
+		printf("[%i]  id=0x%08x maks=0x%08x\n", i, p[i].can_id, p[i].can_mask);
+	}
+#endif
+
+	setsockopt(d->fd, SOL_CAN_RAW, CAN_RAW_FILTER,
+			   (struct can_filter*)arg, cmd * sizeof(struct can_filter));
+
+	return 0;
+}
+
+static void can_chr_update_read_handler(CharDriverState *chr)
+{
+    CANCharDriver *d = chr->opaque;
+
+    if (d->fd >= 0) {
+    	qemu_set_fd_handler2(d->fd, can_chr_read_poll, 
+							 can_chr_read, NULL, chr);
+    }
+}
 
 static CharDriverState *qemu_chr_open_can(QemuOpts *opts)
 {
+	int s; /* can raw socket */
+	int i;
     CharDriverState *chr;
 	CANCharDriver	*d;
-	int s; /* can raw socket */ 
 	struct sockaddr_can addr;
 	struct ifreq ifr;
 
@@ -186,7 +272,6 @@ static CharDriverState *qemu_chr_open_can(QemuOpts *opts)
 		return NULL;
 	}
 
-	DPRINTF("22222222222222222222\n");
     chr = g_malloc0(sizeof(CharDriverState));
 	if (chr == NULL) 
 		goto fail0;
@@ -194,8 +279,8 @@ static CharDriverState *qemu_chr_open_can(QemuOpts *opts)
 	if (d == NULL) 
 		goto fail1;
 
-	DPRINTF("77777777777777777777\n");
 	addr.can_family = AF_CAN;
+	memset(&ifr.ifr_name, 0, sizeof(ifr.ifr_name));
 	strcpy(ifr.ifr_name, port);
 	if (ioctl(s, SIOCGIFINDEX, &ifr) < 0) {
 		perror("SIOCGIFINDEX");
@@ -203,41 +288,41 @@ static CharDriverState *qemu_chr_open_can(QemuOpts *opts)
 	}
 	addr.can_ifindex = ifr.ifr_ifindex;
 
-	DPRINTF("888888888888888\n");
-	setsockopt(s, SOL_CAN_RAW, CAN_RAW_FILTER, NULL, 0);
+
+	d->err_mask = 0xffffffff; // Receive error frame.
+	setsockopt(s, SOL_CAN_RAW, CAN_RAW_ERR_FILTER,
+				   &d->err_mask, sizeof(d->err_mask));
+
+	for (i = 0; i < NUM_FILTER; i++) {
+		d->rfilter[i].can_id = 0; // Receive all data frame. If |= CAN_INV_FILTER no data.
+ 		d->rfilter[i].can_mask = 0;
+		d->rfilter[i].can_mask &= ~CAN_ERR_FLAG;
+	}
+	setsockopt(s, SOL_CAN_RAW, CAN_RAW_FILTER,
+				   d->rfilter, NUM_FILTER * sizeof(struct can_filter));
+
 
 	if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 		perror("bind");
 		goto fail;
 	}
 
-	DPRINTF("999999999999999\n");
 	d->fd = s;
     chr->opaque = d;
     chr->chr_write = can_chr_write;
+    chr->chr_ioctl = can_chr_ioctl;
     chr->chr_close = can_chr_close;
+    chr->chr_update_read_handler = can_chr_update_read_handler;
 
     return chr;
 
 fail:
     g_free(d);
-	DPRINTF("55555555555555\n");
 fail1:
     g_free(chr);
-	DPRINTF("11111111111111\n");
 fail0:
     return NULL;
 }
-
-
-
-
-
-
-
-
-
-
 
 
 void qemu_chr_be_event(CharDriverState *s, int event)
@@ -267,7 +352,6 @@ static void qemu_chr_fire_open_event(void *opaque)
 
 void qemu_chr_generic_open(CharDriverState *s)
 {
-	printf("[ddddd] %s %s called\n", __FUNCTION__, __FILE__);
     if (s->open_timer == NULL) {
         s->open_timer = qemu_new_timer_ms(rt_clock,
                                           qemu_chr_fire_open_event, s);
@@ -360,7 +444,7 @@ static int null_chr_write(CharDriverState *chr, const uint8_t *buf, int len)
 static CharDriverState *qemu_chr_open_null(QemuOpts *opts)
 {
     CharDriverState *chr;
-	printf("NNNNNNNNNNNNNNNNNNNNNNNNNn\n");
+
     chr = g_malloc0(sizeof(CharDriverState));
     chr->chr_write = null_chr_write;
     return chr;
@@ -729,7 +813,6 @@ static void fd_chr_update_read_handler(CharDriverState *chr)
 {
     FDCharDriver *s = chr->opaque;
 
-	printf("[ddddd] %s %s called\n", __FUNCTION__, __FILE__);
     if (s->fd_in >= 0) {
         if (display_type == DT_NOGRAPHIC && s->fd_in == 0) {
         } else {
@@ -743,7 +826,6 @@ static void fd_chr_close(struct CharDriverState *chr)
 {
     FDCharDriver *s = chr->opaque;
 
-	printf("[ddddd] %s %s called\n", __FUNCTION__, __FILE__);
     if (s->fd_in >= 0) {
         if (display_type == DT_NOGRAPHIC && s->fd_in == 0) {
         } else {
@@ -760,8 +842,7 @@ static CharDriverState *qemu_chr_open_fd(int fd_in, int fd_out)
 {
     CharDriverState *chr;
     FDCharDriver *s;
-//4444444444444444
-	printf("[ddddd] %s %s called\n", __FUNCTION__, __FILE__);
+
     chr = g_malloc0(sizeof(CharDriverState));
     s = g_malloc0(sizeof(FDCharDriver));
     s->fd_in = fd_in;
@@ -780,7 +861,6 @@ static CharDriverState *qemu_chr_open_file_out(QemuOpts *opts)
 {
     int fd_out;
 
-	printf("[dddddddddddddddddddddddddd] %s %s called, open %s\n", __FUNCTION__, __FILE__, qemu_opt_get(opts, "path"));
     TFR(fd_out = qemu_open(qemu_opt_get(opts, "path"),
                       O_WRONLY | O_TRUNC | O_CREAT | O_BINARY, 0666));
     if (fd_out < 0) {
@@ -3114,7 +3194,7 @@ static CharDriverState *qemu_chr_open_pp(QemuOpts *opts)
 }
 
 #endif
-//3333333333333333333333333333333333333
+
 static const struct {
     const char *name;
     CharDriverState *(*open)(QemuOpts *opts);
@@ -3163,6 +3243,7 @@ CharDriverState *qemu_chr_new_from_opts(QemuOpts *opts,
 {
     CharDriverState *chr;
     int i;
+
     if (qemu_opts_id(opts) == NULL) {
         error_setg(errp, "chardev: no id specified");
         goto err;
@@ -3182,7 +3263,7 @@ CharDriverState *qemu_chr_new_from_opts(QemuOpts *opts,
                    qemu_opt_get(opts, "backend"));
         goto err;
     }
-printf("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx qemu_chr_new_from_opts() %s\n", backend_table[i].name);
+
     chr = backend_table[i].open(opts);
     if (!chr) {
         error_setg(errp, "chardev: opening backend \"%s\" failed",
