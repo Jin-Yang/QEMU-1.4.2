@@ -7,11 +7,7 @@
 #include "can-pci.h"
 
 #define DEBUG_FILTER
-
-
-static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size);
-
-
+#define DEBUG_RECEIVE
 
 static void can_software_reset(CanState *s)
 {
@@ -26,9 +22,12 @@ static void can_software_reset(CanState *s)
 }
 
 
-// Reset by hardware, p10
-static void can_hardware_reset(CanState *s)
+
+static void can_hardware_reset(void *opaque)
 {
+	CanState *s = opaque;
+
+	// Reset by hardware, p10
 	s->mode			= 0x01;
 	s->statusP 		= 0x3c;
 	s->interruptP	= 0x00;
@@ -37,76 +36,23 @@ static void can_hardware_reset(CanState *s)
 	s->rxmsg_cnt	= 0x00;
 	s->rx_cnt		= 0x00;
 
+
+
+
+
 	s->control		= 0x01;
 	s->statusB		= 0x0c;
 	s->interruptB	= 0x00;
 
 
 
-//	s->clock 	= 0x80;
-//memset(s->code_mask, 0xff, 8); // Receive all data.
 
-/*
-	s->code_mask[3] = 0x18; // ID.1~ID.0 = 3, EFF
-	s->code_mask[4] = 0xff;
-	s->code_mask[5] = 0xff;
-	s->code_mask[6] = 0xff;
-	s->code_mask[7] = 0x87;
-	can_mem_write(s, 0, (1 << 3), 1); */
-/*
-	s->code_mask[1] = 0x60; // ID.1~ID.0 = 3, SFF
-	s->code_mask[4] = 0xff;
-	s->code_mask[5] = 0x9f;
-	s->code_mask[6] = 0xff;
-	s->code_mask[7] = 0xff;
-	can_mem_write(s, 0, (1 << 3), 1);*/
 
-/*
-	s->code_mask[1] = 0x60; // ID.1~ID.0 = 3, SFF, data[0]=AB
-	s->code_mask[2] = 0xab;
-	s->code_mask[4] = 0xff;
-	s->code_mask[5] = 0x9f;
-	s->code_mask[6] = 0x00;
-	s->code_mask[7] = 0xff;
-	can_mem_write(s, 0, (1 << 3), 1);*/
+    qemu_mutex_init(&s->rx_lock);
 
-/*
-	s->code_mask[1] = 0x60; // ID.1~ID.0 = 3, SFF, data[0]=AB,data[1]=CD
-	s->code_mask[2] = 0xab;
-	s->code_mask[3] = 0xcd;
-	s->code_mask[4] = 0xff;
-	s->code_mask[5] = 0x9f;
-	s->code_mask[6] = 0x00;
-	s->code_mask[7] = 0x00;
-	can_mem_write(s, 0, (1 << 3), 1);*/
-
+//	fifo_clear(s,RECV_FIFO);
+	qemu_irq_lower(s->irq);
 }
-
-
-
-/* IO port: JUST for TEST */
-static void can_ioport_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
-{
-//    CanState *s = opaque;
-//	qemu_chr_fe_write(s->chr, whatever, 3); // write to the backends.
-}
-
-static uint64_t can_ioport_read(void *opaque, hwaddr addr, unsigned size)
-{
-	DPRINTF("%s-%s() called\n", __FILE__, __FUNCTION__);
-    return 0;
-}
-
-const MemoryRegionOps can_io_ops = {
-    .read 		= can_ioport_read,
-    .write 		= can_ioport_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .impl 		= {
-        .min_access_size = 1,
-        .max_access_size = 1,
-    },
-};
-
 
 
 // Details in DS-p22, what we need to do here is to test the data.
@@ -263,6 +209,7 @@ static int frame2buffB(struct can_frame *can, uint8_t *buff)
 	   (can->can_id & (1 << 29))) 	// or Error frame, NOT support now.
 		return -1;
 
+	
 	buff[count++] = 0xff & (can->can_id >> 3);
 	buff[count] = 0xe0 & (can->can_id << 5);
 	if(can->can_id & (1 << 30)) // RTR
@@ -272,6 +219,9 @@ static int frame2buffB(struct can_frame *can, uint8_t *buff)
 		buff[count++] = can->data[i];
 	}
 
+	printf(" ==2==");
+	for (i = 0; i < count; i++)
+		printf(" %02X", buff[i]);
 	return count;	
 }
 
@@ -279,17 +229,14 @@ static int frame2buffB(struct can_frame *can, uint8_t *buff)
 static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size) 
 {
     CanState 			*s = opaque;
-	void    			*pci_mem_addr;
-	int    				region_size;
+	int    				region_size, i;
 	struct can_frame	can;
 	uint32_t			tmp;
 	uint8_t				tmp8, count;
 
 
 	DPRINTF("write 0x%llx addr(%d)\n", val, (int)addr);
-
-	pci_mem_addr = s->mem_base;  
-	pci_mem_addr = ((char *)pci_mem_addr) + addr;  
+ 
 	region_size  = (int)memory_region_size(&s->memio);
 	if(addr > region_size)
 		return ;
@@ -510,13 +457,22 @@ static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
 					if (s->rxmsg_cnt <= 0)
 						break;
 
-					tmp8 = s->rx_buff[s->rxbuf_start + 1];		
+	qemu_mutex_lock(&s->rx_lock);
+					tmp8 = s->rx_buff[(s->rxbuf_start + 1) % SJA_RCV_BUF_LEN];
 					count = 2 + (tmp8 & 0x0f);
+					printf("\nRelease");
+					for(i = 0; i < count; i++) 
+						printf(" %02X", s->rx_buff[(s->rxbuf_start + i) % SJA_RCV_BUF_LEN]);
+					for(; i < 11; i++) 
+						printf("   ");
 					s->rxbuf_start += count;
 					s->rxbuf_start %= SJA_RCV_BUF_LEN;
 
+					printf("==== cnt=%d, count=%d\n", s->rx_cnt, count);
 					s->rx_cnt -= count;
 					s->rxmsg_cnt--;
+
+	qemu_mutex_unlock(&s->rx_lock);
 					if(s->rxmsg_cnt == 0) {
 						s->statusB &= ~(1 << 0);
 						s->interruptB &= ~(1 << 0);
@@ -556,20 +512,14 @@ static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
 				break;
 		}
 	}
-
-//		qemu_mod_timer(s->transmit_timer, 0);
-//		qemu_mod_timer(s->transmit_timer, qemu_get_clock_ns(vm_clock) + 8 * get_ticks_per_sec());
 }  
 
 static uint64_t can_mem_read(void *opaque, hwaddr addr, unsigned size) 
 {  
     CanState 			*s = opaque;
-	void    			*pci_mem_addr;  
 	int     			region_size;
 	uint64_t 			temp = 0;
 
-	pci_mem_addr = s->mem_base;  
-	pci_mem_addr = ((char *)pci_mem_addr) + addr;  
 	region_size  = memory_region_size(&s->memio);
 	DPRINTF("read addr %d, region size %d\n", (int)addr, region_size);
 	if(addr > region_size)  
@@ -631,6 +581,7 @@ static uint64_t can_mem_read(void *opaque, hwaddr addr, unsigned size)
 					else
 						temp = 0x00;
 				} else { // Operation mode
+					printf("ddddd\n");
 					temp = s->rx_buff[(s->rxbuf_start + addr - 16) % SJA_RCV_BUF_LEN];
 				}
 				break;
@@ -664,6 +615,7 @@ static uint64_t can_mem_read(void *opaque, hwaddr addr, unsigned size)
 				temp = s->mask;
 				break;
 			case 20:
+				printf("Read   ");
 			case 21:
 			case 22:
 			case 23:
@@ -674,6 +626,7 @@ static uint64_t can_mem_read(void *opaque, hwaddr addr, unsigned size)
 			case 28:
 			case 29:
 				temp = s->rx_buff[(s->rxbuf_start + addr - 20) % SJA_RCV_BUF_LEN];
+				printf(" %02X", (unsigned int)(temp & 0xff));
 				break;
 			case 31:
 				temp = s->clock;
@@ -712,41 +665,42 @@ static int canpci_can_receive(void *opaque)
 			return 0;
 	}
 
-	return 1; // always return 1
+	return 1; // always return 1, when operation mode
 }
 
 
 static void canpci_receive(void *opaque, const uint8_t *buf, int size)
 {
     CanState *s = opaque;
-	uint8_t rcv[SJA_MSG_MAX_LEN]; 
+	static uint8_t rcv[SJA_MSG_MAX_LEN]; 
 	int ret, i;
 
 #ifdef DEBUG_FILTER
+	printf("#################################################\n");
 	display_msg((struct can_frame *)buf);
 #endif
 
 	if(size < sizeof(struct can_frame))
 		return;
 
+	qemu_mutex_lock(&s->rx_lock); // Just do it quickly :)
 	if (s->clock & 0x80) { // PeliCAN Mode
 		s->statusP |= (1 << 4); // the CAN controller is receiving a message
 
-	//    qemu_mutex_lock(&s->rx_lock); // Just do it quickly :)
 		if(accept_filter(s, (struct can_frame*)buf) == 0) {
 			s->statusP &= ~(1 << 4);
 #ifdef DEBUG_FILTER
-			printf("     OUT\n");
+			printf("     NOT\n");
 #endif
-			return;
+			goto fail;
 		}
 
 		if((ret = frame2buffP((struct can_frame*)buf, rcv)) < 0) {
 			s->statusP &= ~(1 << 4);
 #ifdef DEBUG_FILTER
-			printf("     NOT\n");
+			printf("     ERR\n");
 #endif
-			return; // maybe not support now.
+			goto fail; // maybe not support now.
 		}
 
 		if(s->rx_cnt + ret > SJA_RCV_BUF_LEN) { // Data overrun.
@@ -758,11 +712,10 @@ static void canpci_receive(void *opaque, const uint8_t *buf, int size)
 #ifdef DEBUG_FILTER
 			printf("     OVER\n");
 #endif
-			return;
+			goto fail;
 		}
 		s->rx_cnt += ret;
 		s->rxmsg_cnt++;
-	//    qemu_mutex_unlock(&s->rx_lock);
 #ifdef DEBUG_FILTER
 		printf("     OK\n");
 #endif
@@ -783,48 +736,46 @@ static void canpci_receive(void *opaque, const uint8_t *buf, int size)
 		s->statusB |= (1 << 4); // the CAN controller is receiving a message
 
 		if((ret = frame2buffB((struct can_frame*)buf, rcv)) < 0) {
-			s->statusP &= ~(1 << 4);
+			s->statusB &= ~(1 << 4);
 #ifdef DEBUG_FILTER
 			printf("     NOT\n");
 #endif
-			return; // maybe not support now.
+			goto fail; // maybe not support now.
 		}
 
 		if(s->rx_cnt + ret > SJA_RCV_BUF_LEN) { // Data overrun.
 			s->statusB |= (1 << 1); // Overrun status
+			s->statusB &= ~(1 << 4);
 			s->interruptB |= (1 << 3);
 			if (s->control & (1 << 4)) // Overrun interrupt enable
 				qemu_irq_raise(s->irq);
-			s->statusP &= ~(1 << 4);
 #ifdef DEBUG_FILTER
 			printf("     OVER\n");
 #endif
-			return;
+			goto fail;
 		}
 		s->rx_cnt += ret;
 		s->rxmsg_cnt++;
-	//    qemu_mutex_unlock(&s->rx_lock);
 #ifdef DEBUG_FILTER
 		printf("     OK\n");
 #endif
-
+#ifdef DEBUG_RECEIVE
+		printf("RCV B ret=%2d, ptr=%2d cnt=%2d msg=%2d\n", ret, s->rx_ptr, s->rx_cnt, s->rxmsg_cnt); 
+#endif
 		for(i = 0; i < ret; i++) {
 			s->rx_buff[(s->rx_ptr++) % SJA_RCV_BUF_LEN] = rcv[i];
 		}
-	//	if (s->rx_vld < 0) s->rx_vld = 0;
 		s->rx_ptr %= SJA_RCV_BUF_LEN; // update the pointer.
 
 		s->statusB |= 0x01; // Set the Receive Buffer Status. DS-p15
-		s->interruptB |= 0x01;
 		s->statusB &= ~(1 << 4);
+		s->interruptB |= 0x01;
 		if(s->control & 0x02) { // Receive Interrupt enable.
 			qemu_irq_raise(s->irq);
 		}
 	}
-}
-static void canpci_event(void *opaque, int event)
-{
-//    CanState *s = opaque;
+fail:
+	qemu_mutex_unlock(&s->rx_lock);
 }
 
 
@@ -839,22 +790,16 @@ static int can_pci_init(PCIDevice *dev)
 		exit(1);
     }
 
-//    qemu_register_reset(serial_reset, s);
-    qemu_chr_add_handlers(s->chr, canpci_can_receive, canpci_receive, canpci_event, s);
-	
-	s->mem_base = g_malloc0(PCI_MEM_SIZE);
+    qemu_register_reset(can_hardware_reset, s);
+    qemu_chr_add_handlers(s->chr, canpci_can_receive, canpci_receive, NULL, s);
 
     pci->dev.config[PCI_INTERRUPT_PIN] = 0x01;
     s->irq = pci->dev.irq[0];
 
 	qemu_irq_lower(s->irq);
-	
-    memory_region_init_io(&s->portio, &can_io_ops, s, "can", 8);
+
     memory_region_init_io(&s->memio, &can_mem_ops, s, "can", PCI_MEM_SIZE);
-    pci_register_bar(&pci->dev, IO_BAR, PCI_BASE_ADDRESS_SPACE_IO, &s->portio);
     pci_register_bar(&pci->dev, MEM_BAR, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->memio);
-	
-    qemu_mutex_init(&s->rx_lock);
 
 	can_hardware_reset(s);
 
@@ -867,10 +812,9 @@ static void can_pci_exit(PCIDevice *dev)
     CanState *s = &pci->state;
 
     qemu_chr_add_handlers(s->chr, NULL, NULL, NULL, NULL);
+    qemu_unregister_reset(can_hardware_reset, s);
 
-    g_free(s->mem_base);
     memory_region_destroy(&s->memio);
-    memory_region_destroy(&s->portio);
 }
 
 
@@ -919,5 +863,4 @@ static void can_pci_register_types(void)
 }
 
 type_init(can_pci_register_types)
-
 

@@ -171,6 +171,7 @@ static void can_chr_read(void *opaque)
 	CANCharDriver *d = chr->opaque;
 
 	DPRINTF("%s %s called\n", __FUNCTION__, __FILE__);
+
     if (d->max_size == 0)
         return;
 
@@ -252,7 +253,6 @@ static void can_chr_update_read_handler(CharDriverState *chr)
 static CharDriverState *qemu_chr_open_can(QemuOpts *opts)
 {
 	int s; /* can raw socket */
-	int i;
     CharDriverState *chr;
 	CANCharDriver	*d;
 	struct sockaddr_can addr;
@@ -288,18 +288,15 @@ static CharDriverState *qemu_chr_open_can(QemuOpts *opts)
 	}
 	addr.can_ifindex = ifr.ifr_ifindex;
 
-
 	d->err_mask = 0xffffffff; // Receive error frame.
 	setsockopt(s, SOL_CAN_RAW, CAN_RAW_ERR_FILTER,
 				   &d->err_mask, sizeof(d->err_mask));
 
-	for (i = 0; i < NUM_FILTER; i++) {
-		d->rfilter[i].can_id = 0; // Receive all data frame. If |= CAN_INV_FILTER no data.
- 		d->rfilter[i].can_mask = 0;
-		d->rfilter[i].can_mask &= ~CAN_ERR_FLAG;
-	}
+	d->rfilter[0].can_id = 0; // Receive all data frame. If |= CAN_INV_FILTER no data.
+ 	d->rfilter[0].can_mask = 0;
+	d->rfilter[0].can_mask &= ~CAN_ERR_FLAG;
 	setsockopt(s, SOL_CAN_RAW, CAN_RAW_FILTER,
-				   d->rfilter, NUM_FILTER * sizeof(struct can_filter));
+				   d->rfilter, sizeof(struct can_filter));
 
 
 	if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
