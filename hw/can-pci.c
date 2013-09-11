@@ -6,8 +6,7 @@
 
 #include "can-pci.h"
 
-#define DEBUG_FILTER
-#define DEBUG_RECEIVE
+//#define DEBUG_FILTER
 
 static void can_software_reset(CanState *s)
 {
@@ -36,21 +35,12 @@ static void can_hardware_reset(void *opaque)
 	s->rxmsg_cnt	= 0x00;
 	s->rx_cnt		= 0x00;
 
-
-
-
-
 	s->control		= 0x01;
 	s->statusB		= 0x0c;
 	s->interruptB	= 0x00;
 
-
-
-
-
     qemu_mutex_init(&s->rx_lock);
 
-//	fifo_clear(s,RECV_FIFO);
 	qemu_irq_lower(s->irq);
 }
 
@@ -219,9 +209,13 @@ static int frame2buffB(struct can_frame *can, uint8_t *buff)
 		buff[count++] = can->data[i];
 	}
 
+#ifdef DEBUG_FILTER
 	printf(" ==2==");
 	for (i = 0; i < count; i++)
 		printf(" %02X", buff[i]);
+	for (; i < 10; i++)
+		printf("   ");
+#endif
 	return count;	
 }
 
@@ -229,7 +223,7 @@ static int frame2buffB(struct can_frame *can, uint8_t *buff)
 static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size) 
 {
     CanState 			*s = opaque;
-	int    				region_size, i;
+	int    				i;
 	struct can_frame	can;
 	uint32_t			tmp;
 	uint8_t				tmp8, count;
@@ -237,8 +231,8 @@ static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
 
 	DPRINTF("write 0x%llx addr(%d)\n", val, (int)addr);
  
-	region_size  = (int)memory_region_size(&s->memio);
-	if(addr > region_size)
+	i  = (int)memory_region_size(&s->memio);
+	if(addr > i)
 		return ;
 
 	if (s->clock & 0x80) { // PeliCAN Mode
@@ -349,7 +343,9 @@ static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
 			case 1: // Command register.
 				if (0x01 & val) { // Send transmission request.
 					buff2frameP(s->tx_buff, &can);
+#ifdef DEBUG_FILTER
 					display_msg(&can);printf("\n");
+#endif
 					s->statusP &= ~(3 << 2); // Clear transmission complete status,
 											// and Transmit Buffer Status.
 					// write to the backends.
@@ -441,7 +437,9 @@ static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
 			case 1: // Command register.
 				if (0x01 & val) { // Send transmission request.
 					buff2frameB(s->tx_buff, &can);
+#ifdef DEBUG_FILTER
 					display_msg(&can);printf("\n");
+#endif
 					s->statusB &= ~(3 << 2); // Clear transmission complete status,
 											// and Transmit Buffer Status.
 					// write to the backends.
@@ -457,22 +455,23 @@ static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
 					if (s->rxmsg_cnt <= 0)
 						break;
 
-	qemu_mutex_lock(&s->rx_lock);
+					qemu_mutex_lock(&s->rx_lock);
 					tmp8 = s->rx_buff[(s->rxbuf_start + 1) % SJA_RCV_BUF_LEN];
 					count = 2 + (tmp8 & 0x0f);
+#ifdef DEBUG_FILTER
 					printf("\nRelease");
 					for(i = 0; i < count; i++) 
 						printf(" %02X", s->rx_buff[(s->rxbuf_start + i) % SJA_RCV_BUF_LEN]);
 					for(; i < 11; i++) 
 						printf("   ");
+					printf("==== cnt=%d, count=%d\n", s->rx_cnt, count);
+#endif
 					s->rxbuf_start += count;
 					s->rxbuf_start %= SJA_RCV_BUF_LEN;
-
-					printf("==== cnt=%d, count=%d\n", s->rx_cnt, count);
 					s->rx_cnt -= count;
 					s->rxmsg_cnt--;
+					qemu_mutex_unlock(&s->rx_lock);
 
-	qemu_mutex_unlock(&s->rx_lock);
 					if(s->rxmsg_cnt == 0) {
 						s->statusB &= ~(1 << 0);
 						s->interruptB &= ~(1 << 0);
@@ -581,7 +580,6 @@ static uint64_t can_mem_read(void *opaque, hwaddr addr, unsigned size)
 					else
 						temp = 0x00;
 				} else { // Operation mode
-					printf("ddddd\n");
 					temp = s->rx_buff[(s->rxbuf_start + addr - 16) % SJA_RCV_BUF_LEN];
 				}
 				break;
@@ -615,7 +613,9 @@ static uint64_t can_mem_read(void *opaque, hwaddr addr, unsigned size)
 				temp = s->mask;
 				break;
 			case 20:
+#ifdef DEBUG_FILTER
 				printf("Read   ");
+#endif
 			case 21:
 			case 22:
 			case 23:
@@ -626,7 +626,9 @@ static uint64_t can_mem_read(void *opaque, hwaddr addr, unsigned size)
 			case 28:
 			case 29:
 				temp = s->rx_buff[(s->rxbuf_start + addr - 20) % SJA_RCV_BUF_LEN];
+#ifdef DEBUG_FILTER
 				printf(" %02X", (unsigned int)(temp & 0xff));
+#endif
 				break;
 			case 31:
 				temp = s->clock;
@@ -723,7 +725,6 @@ static void canpci_receive(void *opaque, const uint8_t *buf, int size)
 		for(i = 0; i < ret; i++) {
 			s->rx_buff[(s->rx_ptr++) % SJA_RCV_BUF_LEN] = rcv[i];
 		}
-	//	if (s->rx_vld < 0) s->rx_vld = 0;
 		s->rx_ptr %= SJA_RCV_BUF_LEN; // update the pointer.
 
 		s->statusP |= 0x01; // Set the Receive Buffer Status. DS-p23
@@ -758,8 +759,6 @@ static void canpci_receive(void *opaque, const uint8_t *buf, int size)
 		s->rxmsg_cnt++;
 #ifdef DEBUG_FILTER
 		printf("     OK\n");
-#endif
-#ifdef DEBUG_RECEIVE
 		printf("RCV B ret=%2d, ptr=%2d cnt=%2d msg=%2d\n", ret, s->rx_ptr, s->rx_cnt, s->rxmsg_cnt); 
 #endif
 		for(i = 0; i < ret; i++) {
@@ -809,7 +808,7 @@ static int can_pci_init(PCIDevice *dev)
 static void can_pci_exit(PCIDevice *dev)
 {
     PCICanState *pci = DO_UPCAST(PCICanState, dev, dev);
-    CanState *s = &pci->state;
+    CanState 	  *s = &pci->state;
 
     qemu_chr_add_handlers(s->chr, NULL, NULL, NULL, NULL);
     qemu_unregister_reset(can_hardware_reset, s);
@@ -819,10 +818,10 @@ static void can_pci_exit(PCIDevice *dev)
 
 
 static const VMStateDescription vmstate_pci_can = {
-    .name = "pci-can",
-    .version_id = PCI_REVISION_ID_CANBUS,
+    .name 				= "pci-can",
+    .version_id 		= PCI_REVISION_ID_CANBUS,
     .minimum_version_id = 1,
-    .fields      = (VMStateField[]) {
+    .fields      		= (VMStateField[]) {
         VMSTATE_PCI_DEVICE(dev, PCICanState),
         VMSTATE_END_OF_LIST()
     }
@@ -835,26 +834,26 @@ static Property can_pci_properties[] = {
 
 static void can_pci_class_initfn(ObjectClass *klass, void *data)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    PCIDeviceClass *pc = PCI_DEVICE_CLASS(klass);
+    DeviceClass 	*dc = DEVICE_CLASS(klass);
+    PCIDeviceClass 	*pc = PCI_DEVICE_CLASS(klass);
 	
-    pc->init = can_pci_init;
-    pc->exit = can_pci_exit;
-    pc->vendor_id = PCI_VENDOR_ID_REDHAT; // 0x1b36
-    pc->device_id = PCI_DEVICE_ID_CANBUS;
-    pc->revision = PCI_REVISION_ID_CANBUS;
-    pc->class_id = PCI_CLASS_OTHERS;
+    pc->init 		= can_pci_init;
+    pc->exit 		= can_pci_exit;
+    pc->vendor_id 	= PCI_VENDOR_ID_REDHAT; // 0x1b36
+    pc->device_id 	= PCI_DEVICE_ID_CANBUS;
+    pc->revision 	= PCI_REVISION_ID_CANBUS;
+    pc->class_id 	= PCI_CLASS_OTHERS;
 
-    dc->desc = "PCI CAN SJA1000";
-    dc->vmsd = &vmstate_pci_can;
-    dc->props = can_pci_properties;
+    dc->desc 		= "PCI CAN SJA1000";
+    dc->vmsd 		= &vmstate_pci_can;
+    dc->props 		= can_pci_properties;
 }
 
 static const TypeInfo can_pci_info = {
-    .name          = "pci-can",
-    .parent        = TYPE_PCI_DEVICE,
-    .instance_size = sizeof(PCICanState),
-    .class_init    = can_pci_class_initfn,
+    .name			= "pci-can",
+    .parent			= TYPE_PCI_DEVICE,
+    .instance_size	= sizeof(PCICanState),
+    .class_init		= can_pci_class_initfn,
 };
 
 static void can_pci_register_types(void)

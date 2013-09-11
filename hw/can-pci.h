@@ -5,8 +5,13 @@
 #define PCI_DEVICE_ID_CANBUS		0xbeef
 #define PCI_REVISION_ID_CANBUS 		0x73 
 
-#define IO_BAR						0
-#define MEM_BAR						1
+#define MEM_BAR						0
+
+// The max size for a message buffer, EFF and DLC=8, DS-p39
+#define SJA_MSG_MAX_LEN				13
+// The receive buffer size.
+#define SJA_RCV_BUF_LEN				64
+
 
 //#define DEBUG_CAN
 #ifdef DEBUG_CAN
@@ -17,6 +22,9 @@
    do {} while (0)
 #endif
 
+
+
+/* NOTE: the following two structures is copied from <linux/can.h>. */
 
 /*
  * Controller Area Network Identifier structure
@@ -57,31 +65,6 @@ struct can_filter {
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// The max size for a message buffer, EFF and DLC=8, DS-p39
-#define SJA_MSG_MAX_LEN				13
-// The receive buffer size.
-#define SJA_RCV_BUF_LEN				64
-
 typedef struct CanState {
 	/* Some registers ... */
 	uint8_t			mode; 			// PeliCAN, addr 0, Mode register, DS-p26
@@ -98,11 +81,8 @@ typedef struct CanState {
 									// BasicCAN, addr 10~19, transmit buffer
 
 	uint8_t			rx_buff[SJA_RCV_BUF_LEN];  // 32~95, 64bytes
-	int				rx_ptr; // 
+	int				rx_ptr;         // Count by bytes.
 	int				rx_cnt; 		// Count by bytes.
-
-	struct can_filter	filter[4];
-
 
 	uint8_t			control;		// BasicCAN, addr 0, Control register
 									// BasicCAN, addr 1, Command register
@@ -112,9 +92,9 @@ typedef struct CanState {
 	uint8_t			mask;			// BasicCAN, addr 5, Acceptance mask register
 
 
+	struct can_filter	filter[4];
 
 	QemuMutex		rx_lock;
-
     qemu_irq 		irq;
     CharDriverState *chr;
     MemoryRegion 	memio;
@@ -124,6 +104,9 @@ typedef struct PCICanState {
     PCIDevice 		dev;
     CanState 		state;
 } PCICanState;
+
+
+
 
 #endif
 
