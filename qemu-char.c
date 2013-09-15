@@ -107,17 +107,6 @@
 static QTAILQ_HEAD(CharDriverStateHead, CharDriverState) chardevs =
     QTAILQ_HEAD_INITIALIZER(chardevs);
 
-
-//#define DEBUG_CAN
-#ifdef DEBUG_CAN
-#define DPRINTF(fmt, ...) \
-   do { fprintf(stderr, "[backend]: " fmt , ## __VA_ARGS__); } while (0)
-#else
-#define DPRINTF(fmt, ...) \
-   do {} while (0)
-#endif
-
-
 #define NUM_FILTER				4
 #define CAN_READ_BUF_LEN		5
 typedef struct {
@@ -170,8 +159,6 @@ static void can_chr_read(void *opaque)
 	CharDriverState *chr = opaque;
 	CANCharDriver *d = chr->opaque;
 
-	DPRINTF("%s %s called\n", __FUNCTION__, __FILE__);
-
     if (d->max_size == 0)
         return;
 
@@ -197,8 +184,6 @@ static void can_chr_read(void *opaque)
 static int can_chr_write(CharDriverState *chr, const uint8_t *buf, int len)
 {
     CANCharDriver *d = chr->opaque;
-
-	DPRINTF("%s-%s() called, len(%d)\n", __FILE__, __FUNCTION__, len);
 	
 	/* send frame */
 	if (write(d->fd, (struct can_frame*)buf, len) != len) {
@@ -257,27 +242,28 @@ static CharDriverState *qemu_chr_open_can(QemuOpts *opts)
 	CANCharDriver	*d;
 	struct sockaddr_can addr;
 	struct ifreq ifr;
+    const char *port;
 
-	DPRINTF("%s %s called\n", __FUNCTION__, __FILE__);
-
-    const char *port = qemu_opt_get(opts, "port");	
+	/* get the value of argument 'port' */
+	port = qemu_opt_get(opts, "port");	
 	if (port == NULL) {
 		printf("The parameter \"port\" must be specified\n");
 		return NULL;
 	}
 
-	/* open socket */
-	if ((s = socket(PF_CAN, SOCK_RAW, CAN_RAW)) < 0) {
-		perror("socket");
-		return NULL;
-	}
-
+	/* allocate the memory at first */
     chr = g_malloc0(sizeof(CharDriverState));
 	if (chr == NULL) 
 		goto fail0;
     d = g_malloc0(sizeof(CANCharDriver));
 	if (d == NULL) 
 		goto fail1;
+
+	/* open socket */
+	if ((s = socket(PF_CAN, SOCK_RAW, CAN_RAW)) < 0) {
+		perror("socket");
+		return NULL;
+	}
 
 	addr.can_family = AF_CAN;
 	memset(&ifr.ifr_name, 0, sizeof(ifr.ifr_name));

@@ -789,6 +789,13 @@ static int can_pci_init(PCIDevice *dev)
 		exit(1);
     }
 
+	if (pci->model) {
+		if (strncmp(pci->model, "SJA1000", 256)) { /* for security reason */
+		    fprintf(stderr, "Can't create can device, the model %s doesn't support now.\n", pci->model);
+			exit(1);
+		}
+	}
+
     qemu_register_reset(can_hardware_reset, s);
     qemu_chr_add_handlers(s->chr, canpci_can_receive, canpci_receive, NULL, s);
 
@@ -829,6 +836,7 @@ static const VMStateDescription vmstate_pci_can = {
 
 static Property can_pci_properties[] = {
     DEFINE_PROP_CHR("chardev",  PCICanState, state.chr),
+	DEFINE_PROP_STRING("model",  PCICanState, model),
     DEFINE_PROP_END_OF_LIST(),
 };
 

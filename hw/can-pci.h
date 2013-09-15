@@ -103,6 +103,7 @@ typedef struct CanState {
 typedef struct PCICanState {
     PCIDevice 		dev;
     CanState 		state;
+	char			*model;
 } PCICanState;
 
 
