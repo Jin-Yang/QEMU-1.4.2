@@ -107,6 +107,7 @@
 static QTAILQ_HEAD(CharDriverStateHead, CharDriverState) chardevs =
     QTAILQ_HEAD_INITIALIZER(chardevs);
 
+#ifdef __linux__
 #define NUM_FILTER				4
 #define CAN_READ_BUF_LEN		5
 typedef struct {
@@ -306,7 +307,7 @@ fail1:
 fail0:
     return NULL;
 }
-
+#endif
 
 void qemu_chr_be_event(CharDriverState *s, int event)
 {

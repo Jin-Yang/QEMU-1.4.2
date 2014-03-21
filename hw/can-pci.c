@@ -1,3 +1,27 @@
+/*
+ * CAN device (SJA1000) simulation based on PCI-bus
+ *
+ * Copyright (c) 2013 Jin Yang
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+#ifdef __linux__
 #include "pci/pci.h"
 #include "char/char.h"
 #include "qemu/timer.h"
@@ -19,8 +43,6 @@ static void can_software_reset(CanState *s)
 	s->rxmsg_cnt	= 0x00;
 	s->rx_cnt		= 0x00;
 }
-
-
 
 static void can_hardware_reset(void *opaque)
 {
@@ -237,7 +259,7 @@ static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
 
 	if (s->clock & 0x80) { // PeliCAN Mode
 		switch (addr) {
-			case 0:
+			case SJAMOD: // Mode register
 				s->mode = 0x1f & val;
 				if((s->mode & 0x01) && ((val & 0x01) == 0)) {
 					// Go to operation mode from reset mode.
@@ -340,7 +362,7 @@ static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
 				}
 				break;
 
-			case 1: // Command register.
+			case SJACMR: // Command register.
 				if (0x01 & val) { // Send transmission request.
 					buff2frameP(s->tx_buff, &can);
 #ifdef DEBUG_FILTER
@@ -384,13 +406,13 @@ static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
 						qemu_irq_lower(s->irq);
 				}
 				break;
-			case 2: // Status register
-			case 3: // Interrupt register
+			case SJASR: // Status register
+			case SJAIR: // Interrupt register
 				break; // Do nothing
-			case 4:
+			case SJAIER: // Interrupt enable register
 				s->interrupt_en = val;
 				break;
-			case 16:
+			case 16: // RX frame information addr16-28.
 				s->statusP |= (1 << 5); // Set transmit status.
 			case 17:
 			case 18:
@@ -411,13 +433,13 @@ static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
 				} else // Operation mode
 					s->tx_buff[addr - 16] = val; // Store to TX buffer directly.
 				break;
-			case 31:
+			case SJACDR:
 				s->clock = val;
 				break;
 		}
 	} else { // Basic Mode
 		switch (addr) {
-			case 0: // Control register
+			case B_SJACTR: // Control register, addr 0
 				if((s->control & 0x01) && ((val & 0x01) == 0)) {
 					// Go to operation mode from reset mode.
 					s->filter[0].can_id = (s->code << 3) & (0xff << 3);
@@ -434,7 +456,7 @@ static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
 
 				s->control = 0x1f & val;
 				break;
-			case 1: // Command register.
+			case B_SJACMR: // Command register, addr 1
 				if (0x01 & val) { // Send transmission request.
 					buff2frameB(s->tx_buff, &can);
 #ifdef DEBUG_FILTER
@@ -506,7 +528,7 @@ static void can_mem_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
 					s->tx_buff[addr - 10] = val; // Store to TX buffer directly.
 				}
 				break;
-			case 31:
+			case SJACDR:
 				s->clock = val;
 				break;
 		}
@@ -526,16 +548,16 @@ static uint64_t can_mem_read(void *opaque, hwaddr addr, unsigned size)
 
 	if (s->clock & 0x80) { // PeliCAN Mode
 		switch (addr) {
-			case 0:
+			case SJAMOD: // Mode register, addr 0
 				temp = s->mode;
 				break;
-			case 1:
+			case SJACMR: // Command register, addr 1
 				temp = 0x00; // Command register, cannot be read.
 				break;
-			case 2: // Status register.
+			case SJASR: // Status register, addr 2
 				temp = s->statusP;
 				break;
-			case 3: // Interrupt register.
+			case SJAIR: // Interrupt register, addr 3
 				temp = s->interruptP;
 				s->interruptP = 0;
 				if (s->rxmsg_cnt) {
@@ -544,7 +566,7 @@ static uint64_t can_mem_read(void *opaque, hwaddr addr, unsigned size)
 				}
 				qemu_irq_lower(s->irq);
 				break;
-			case 4: // Interrupt enable register.
+			case SJAIER: // Interrupt enable register, addr 4
 				temp = s->interrupt_en;
 				break;
 			case 5: // Reserved
@@ -583,7 +605,7 @@ static uint64_t can_mem_read(void *opaque, hwaddr addr, unsigned size)
 					temp = s->rx_buff[(s->rxbuf_start + addr - 16) % SJA_RCV_BUF_LEN];
 				}
 				break;
-			case 31:
+			case SJACDR:
 				temp = s->clock;
 				break;
 			default:
@@ -591,13 +613,13 @@ static uint64_t can_mem_read(void *opaque, hwaddr addr, unsigned size)
 		}
 	} else { // Basic Mode
 		switch (addr) {
-			case 0: // Control register
+			case B_SJACTR: // Control register, addr 0
 				temp = s->control;
 				break;
-			case 2:
+			case B_SJASR: // Status register, addr 2
 				temp = s->statusB;
 				break;
-			case 3:
+			case B_SJAIR: // Interrupt register, addr 3
 				temp = s->interruptB;
 				s->interruptB = 0;
 				if (s->rxmsg_cnt) {
@@ -870,4 +892,6 @@ static void can_pci_register_types(void)
 }
 
 type_init(can_pci_register_types)
+
+#endif /* __linux__ */
 

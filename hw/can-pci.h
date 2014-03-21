@@ -1,3 +1,26 @@
+/*
+ * CAN device (SJA1000) simulation based on PCI-bus
+ *
+ * Copyright (c) 2013 Jin Yang
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
 #ifndef HW_CAN_PCI_H
 #define HW_CAN_PCI_H
 
@@ -103,8 +126,76 @@ typedef struct CanState {
 typedef struct PCICanState {
     PCIDevice 		dev;
     CanState 		state;
-	char			*model;
+	char			*model; // The model that support, only SJA1000 now.
 } PCICanState;
+
+
+
+
+/* PeliCAN mode */
+enum SJA1000_PeliCAN_regs {
+	SJAMOD	= 0x00,
+/// Command register
+	SJACMR 	= 0x01,
+/// Status register
+	SJASR	= 0x02,
+/// Interrupt register
+	SJAIR	= 0x03,
+/// Interrupt Enable
+	SJAIER	= 0x04,
+/// Bus Timing register 0
+	SJABTR0 = 0x06,
+/// Bus Timing register 1
+	SJABTR1	= 0x07,
+/// Output Control register
+	SJAOCR	= 0x08,
+/// Arbitration Lost Capture
+	SJAALC	= 0x0b,
+/// Error Code Capture
+	SJAECC	= 0x0c,
+/// Error Warning Limit
+	SJAEWLR = 0x0d,
+/// RX Error Counter
+	SJARXERR = 0x0e,
+/// TX Error Counter
+	SJATXERR0 = 0x0e,
+	SJATXERR1 = 0x0f,
+/// Rx Message Counter (number of msgs. in RX FIFO
+	SJARMC	= 0x1d,
+/// Rx Buffer Start Addr. (address of current MSG)
+	SJARBSA	= 0x1e,
+/// Transmit Buffer (write) Receive Buffer (read) Frame Information
+	SJAFRM = 0x10,
+/// ID bytes (11 bits in 0 and 1 or 16 bits in 0,1 and 13 bits in 2,3 (extended))
+	SJAID0 = 0x11, SJAID1 = 0x12,
+/// ID cont. for extended frames
+	SJAID2 = 0x13, SJAID3 = 0x14,
+/// Data start standard frame
+	SJADATS = 0x13,
+/// Data start extended frame
+	SJADATE = 0x15,
+/// Acceptance Code (4 bytes) in RESET mode
+	SJAACR0	= 0x10,
+/// Acceptance Mask (4 bytes) in RESET mode
+	SJAAMR0	= 0x14,
+/// 4 bytes
+	SJA_PeliCAN_AC_LEN = 4,
+/// Clock Divider
+	SJACDR = 0x1f
+};
+
+
+/* PeliCAN mode */
+enum SJA1000_BasicCAN_regs {
+	B_SJACTR	= 0x00,
+/// Command register
+	B_SJACMR 	= 0x01,
+/// Status register
+	B_SJASR 	= 0x02,
+/// Interrupt register
+	B_SJAIR 	= 0x03
+};
+
 
 
 
